@@ -1,5 +1,29 @@
 const fs = require('fs').promises;
 const cheerio = require('cheerio');
+const z = require('zod')
+
+const Book = z.object({
+  title: z.string().min(1),
+  product_url: z.string().startsWith('https://'),
+  
+  // Price (raw string + numeric)
+  price_text: z.string(),
+  price_gbp: z.number().positive(),
+  
+  // Availability & Stock (raw string + integer count + in-stock boolean)
+  availability_text: z.string(),
+  stock_count: z.number().int().nonnegative(),
+  is_in_stock: z.boolean(),
+  
+  // Rating (raw string + integer 1-5)
+  rating_text: z.string(),
+  rating_num: z.number().int().min(0).max(5),
+  
+  // Details & Provenance
+  description: z.string().nullable(),
+  source_page: z.string().startsWith('https://'),
+  fetched_at: z.string()
+});
 
 const BASE_URL = 'https://books.toscrape.com/catalogue/';
 
@@ -70,6 +94,17 @@ async function fecthOrCacheBook(url) {
     }
 }
 
+function ratingToInt(str) {
+  const ratings = {
+    'One': 1,
+    'Two': 2,
+    'Three': 3,
+    'Four': 4,
+    'Five': 5
+  };
+  return ratings[str] || 0;
+}
+
 async function main() {
     let numPage = 1;
     let nextHref = "";
@@ -108,7 +143,8 @@ async function main() {
         const bookTitle = $('article.product_page .product_main h1').text();
         const price_text = $('article.product_page th:contains("Price (excl. tax)") + td').text();
         const availability_text = $('article.product_page th:contains("Availability") + td').text();
-        const rating_text = $('article.product_page .star-rating')[0].attribs.class.replace("star-rating ", "")
+        const stock = parseInt(availability_text.split('').filter(char => !isNaN(char) && char !== ' ').join(''));
+        const rating_text = $('article.product_page .star-rating')[0].attribs.class.replace("star-rating ", "");
         const description = $('article.product_page #product_description + p').text();
         const fetched_at = new Date().toISOString();
 
@@ -116,8 +152,12 @@ async function main() {
             "title": bookTitle,
             "product_url": url,
             "price_text": price_text,
+            "price_gbp": parseFloat(price_text.replace("£","")),
             "availability_text": availability_text,
+            "stock_count": stock,
+            "is_in_stock": stock > 0, 
             "rating_text": rating_text,
+            "rating_num": ratingToInt(rating_text),
             "description": description.trim().length > 0 ? description.trim() : null,
             "source_page": source_page,
             "fetched_at": fetched_at
@@ -128,6 +168,26 @@ async function main() {
 
     console.log('Sample record:', rawRecords[10]);
     console.log(`detail_pages=${rawRecords.length}`);
+
+    await fs.mkdir('output', { recursive: true });
+
+    const books_parsed = [];
+    const errors = [];
+
+    for (const rawData of rawRecords) {
+    const result = Book.safeParse(rawData);
+    if (result.success) {
+        books_parsed.push(result.data);
+    } else {
+        errors.push({
+        record: rawData,
+        errors: result.error.issues
+        });
+    }
+    }
+
+    await fs.writeFile('output/books.json', JSON.stringify(books_parsed, null, 2), 'utf-8');
+    await fs.writeFile('output/errors.json', JSON.stringify(errors, null, 2), 'utf-8');
 }
 
 main()
