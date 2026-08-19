@@ -4,7 +4,7 @@ A robust, idempotent web scraping pipeline built for the Books to Scrape sandbox
 
 ---
 
-## Target Classification
+## 1. Target Classification
 
 * **Target Site:** [https://books.toscrape.com](https://books.toscrape.com)
 * **Purpose & Permission:** This site is explicitly designed as a public practice sandbox for learning web scraping. The homepage includes a clear notice:
