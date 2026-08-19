@@ -25,7 +25,56 @@ const Book = z.object({
   fetched_at: z.string()
 });
 
+const report = {
+    start_time: 0,
+    end_time: null,
+    duration_ms: 0,
+    catalogue_pages_discovered: 0,
+    cache_hits: 0,
+    network_fetches: 0,
+    valid_records: 0,
+    invalid_records: 0,
+    failed_pages: 0
+};
+
 const BASE_URL = 'https://books.toscrape.com/catalogue/';
+
+async function requestWithRetry(url, maxRetries = 1) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: { "User-Agent"   : "FlyRankInternship-A9/1.0 (+https://github.com/Yizuz02/Book-Scrapper)" },
+        signal: AbortSignal.timeout(5000)
+      });
+
+      if (response.status === 200) {
+        report.network_fetches += 1;
+        return await response.text();
+      }
+
+      if (response.status === 404 || response.status === 403) {
+        throw new Error(`HTTP ${response.status}: Permanent failure, no retry`);
+      }
+
+      if (response.status >= 500 && attempt < maxRetries) {
+        console.warn(`Server error ${response.status} on ${url}. Retrying attempt ${attempt + 1}...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+
+      throw new Error(`Failed to fetch page. HTTP status: ${response.status}`);
+    } catch (err) {
+      if (attempt < maxRetries && (err.name === 'TimeoutError' || err.code === 'UND_ERR_CONNECT_TIMEOUT')) {
+        console.warn(`Timeout on ${url}. Retrying attempt ${attempt + 1}...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 async function fecthOrCacheCatalogue(currentPageUrl, numPage) {
     await fs.mkdir('cache', { recursive: true });
@@ -35,28 +84,21 @@ async function fecthOrCacheCatalogue(currentPageUrl, numPage) {
         const size = Buffer.byteLength(fileContent, 'utf-8');
         console.log("CACHE HIT")
         console.log(`Size: ${size} bytes`)
+        report.cache_hits += 1;
         return fileContent
     } catch (error) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        const response = await fetch(currentPageUrl, {
-            method  : 'GET', 
-            headers : {
-                "User-Agent"   : "FlyRankInternship-A9/1.0 (+https://github.com/Yizuz02/Book-Scrapper)"
-            },
-            signal: AbortSignal.timeout(5000)
-        });
+        try {
+            const html = await requestWithRetry(currentPageUrl, 5)
+            await fs.writeFile(cacheFile, html, 'utf-8');
+            const size = Buffer.byteLength(html, 'utf-8');
+            console.log("FETCH")
+            console.log(`Size: ${size} bytes`)
+            return html;
 
-        if (response.status !== 200) {
-            throw new Error(`Failed to fetch page. HTTP status: ${response.status}`);
+        } catch (error) {
+            throw new Error(error);
         }
-
-        const html = await response.text();
-        await fs.writeFile(cacheFile, html, 'utf-8');
-
-        const size = Buffer.byteLength(html, 'utf-8');
-        console.log("FETCH")
-        console.log(`Size: ${size} bytes`)
-        return html;
+        
     }
 }
 
@@ -69,28 +111,20 @@ async function fecthOrCacheBook(url) {
         const size = Buffer.byteLength(fileContent, 'utf-8');
         console.log("CACHE HIT BOOK")
         console.log(`Size: ${size} bytes`)
+        report.cache_hits += 1;
         return fileContent;
     } catch (error) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        const response = await fetch(url, {
-            method  : 'GET', 
-            headers : {
-                "User-Agent"   : "FlyRankInternship-A9/1.0 (+https://github.com/Yizuz02/Book-Scrapper)"
-            },
-            signal: AbortSignal.timeout(5000)
-        });
-
-        if (response.status !== 200) {
-            throw new Error(`Failed to fetch page. HTTP status: ${response.status}`);
+        try {
+            const html = await requestWithRetry(url, 5)
+            await fs.writeFile(cacheFile, html, 'utf-8');
+            const size = Buffer.byteLength(html, 'utf-8');
+            console.log("FETCH BOOK")
+            console.log(`Size: ${size} bytes`)
+            return html;
+        } catch (error) {
+            throw new Error(error);
         }
-
-        const html = await response.text();
-        await fs.writeFile(cacheFile, html, 'utf-8');
-
-        const size = Buffer.byteLength(html, 'utf-8');
-        console.log("FETCH BOOK")
-        console.log(`Size: ${size} bytes`)
-        return html;
+        
     }
 }
 
@@ -106,64 +140,80 @@ function ratingToInt(str) {
 }
 
 async function main() {
+    const startTime = Date.now();
+    report.start_time = new Date(startTime).toISOString();
+
     let numPage = 1;
     let nextHref = "";
     let totalDiscovered = 0;
     const booksMap = new Map();
 
     while (numPage <= 3) {
-        const currentPageUrl = new URL(nextHref || 'page-1.html', BASE_URL).href;
-        const html = await fecthOrCacheCatalogue(currentPageUrl, numPage);
-        const $ = cheerio.load(html);
+        try {
+            const currentPageUrl = new URL(nextHref || 'page-1.html', BASE_URL).href;
+            const html = await fecthOrCacheCatalogue(currentPageUrl, numPage);
+            const $ = cheerio.load(html);
 
-        $('article.product_pod h3 a').each((_, el) => {
-            const href = $(el).attr('href');
-            const absoluteUrl = new URL(href, BASE_URL).href;
+            $('article.product_pod h3 a').each((_, el) => {
+                const href = $(el).attr('href');
+                const absoluteUrl = new URL(href, BASE_URL).href;
 
-            totalDiscovered += 1;
-            booksMap.set(absoluteUrl, currentPageUrl);
-        });
+                totalDiscovered += 1;
+                booksMap.set(absoluteUrl, currentPageUrl);
+            });
 
-        const nextRelHref = $('li.next a').attr('href');
-        if (nextRelHref) {
-            nextHref = nextRelHref;
+            const nextRelHref = $('li.next a').attr('href');
+            if (nextRelHref) {
+                nextHref = nextRelHref;
+            }
+
+            numPage += 1;
+        } catch (pageError) {
+            console.error(`Error: ${pageError.message}`);
+            return;
         }
-
-        numPage += 1;
     }
 
     console.log(`catalogue_pages=${numPage - 1} discovered=${totalDiscovered} unique_urls=${booksMap.size}`);
     
+    report.catalogue_pages_discovered = numPage - 1;
+
     const rawRecords = [];
 
     for (const [url, source_page] of booksMap) {
-        const bookHtml = await fecthOrCacheBook(url);
-        const $ = cheerio.load(bookHtml);
+        try {
+            const bookHtml = await fecthOrCacheBook(url);
+            const $ = cheerio.load(bookHtml);
 
-        const bookTitle = $('article.product_page .product_main h1').text();
-        const price_text = $('article.product_page th:contains("Price (excl. tax)") + td').text();
-        const availability_text = $('article.product_page th:contains("Availability") + td').text();
-        const stock = parseInt(availability_text.split('').filter(char => !isNaN(char) && char !== ' ').join(''));
-        const rating_text = $('article.product_page .star-rating')[0].attribs.class.replace("star-rating ", "");
-        const description = $('article.product_page #product_description + p').text();
-        const fetched_at = new Date().toISOString();
+            const bookTitle = $('article.product_page .product_main h1').text();
+            const price_text = $('article.product_page th:contains("Price (excl. tax)") + td').text();
+            const availability_text = $('article.product_page th:contains("Availability") + td').text();
+            const stock = parseInt(availability_text.split('').filter(char => !isNaN(char) && char !== ' ').join(''));
+            const rating_text = $('article.product_page .star-rating')[0].attribs.class.replace("star-rating ", "");
+            const description = $('article.product_page #product_description + p').text();
+            const fetched_at = new Date().toISOString();
 
-        const bookInfo = {
-            "title": bookTitle,
-            "product_url": url,
-            "price_text": price_text,
-            "price_gbp": parseFloat(price_text.replace("£","")),
-            "availability_text": availability_text,
-            "stock_count": stock,
-            "is_in_stock": stock > 0, 
-            "rating_text": rating_text,
-            "rating_num": ratingToInt(rating_text),
-            "description": description.trim().length > 0 ? description.trim() : null,
-            "source_page": source_page,
-            "fetched_at": fetched_at
+            const bookInfo = {
+                "title": bookTitle,
+                "product_url": url,
+                "price_text": price_text,
+                "price_gbp": parseFloat(price_text.replace("£","")),
+                "availability_text": availability_text,
+                "stock_count": stock,
+                "is_in_stock": stock > 0, 
+                "rating_text": rating_text,
+                "rating_num": ratingToInt(rating_text),
+                "description": description.trim().length > 0 ? description.trim() : null,
+                "source_page": source_page,
+                "fetched_at": fetched_at
+            }
+
+            rawRecords.push(bookInfo);
+        } catch (pageError) {
+            console.error(`Skipping broken page (${url}): ${pageError.message}`);
+            report.failed_pages += 1;
         }
-
-        rawRecords.push(bookInfo);
+        
     }
 
     console.log('Sample record:', rawRecords[10]);
@@ -188,6 +238,15 @@ async function main() {
 
     await fs.writeFile('output/books.json', JSON.stringify(books_parsed, null, 2), 'utf-8');
     await fs.writeFile('output/errors.json', JSON.stringify(errors, null, 2), 'utf-8');
+
+
+    report.valid_records = books_parsed.length;
+    report.invalid_records = errors.length;
+    report.end_time = new Date().toISOString();
+    report.duration_ms = Date.now() - startTime;
+
+    await fs.writeFile('output/run-report.json', JSON.stringify(report, null, 2), 'utf-8');
+    console.log('Run report completed:', report);
 }
 
 main()
